@@ -1,151 +1,142 @@
 import streamlit as st
+import groq
+import os
 import pandas as pd
-import math
-from pathlib import Path
+import json
+from datetime import datetime
+from typing import List, Dict, Any
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Set page configuration
+st.set_page_config(page_title="Lead Generation AI", page_icon="💼", layout="wide")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Initialize Groq API key
+if 'GROQ_API_KEY' not in st.session_state:
+    st.session_state.GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Lead data storage
+if 'leads' not in st.session_state:
+    st.session_state.leads = []
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# Chat history storage
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+# Initialize Groq client
+def initialize_groq_client():
+    """Initialize Groq client with API key"""
+    api_key = st.session_state.GROQ_API_KEY.strip()
+    if api_key:
+        try:
+            return groq.Groq(api_key=api_key)
+        except Exception as e:
+            st.error(f"Error initializing Groq client: {e}")
+    return None
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+# Fetch response from Groq API
+def get_groq_response(client, messages: List[Dict[str, str]]) -> str:
+    """Get response from Groq API"""
+    try:
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",  # Groq's high-performance model
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1024,
         )
+        return response.choices[0].message.content
+    except Exception as e:
+        st.error(f"Error fetching response from Groq: {e}")
+        return "I'm sorry, I'm having trouble connecting right now. Please try again later."
+
+# Lead qualification functions
+def extract_lead_data(response: str) -> Dict[str, Any]:
+    """Extract lead data from AI response"""
+    try:
+        json_start = response.find("```json")
+        json_end = response.find("```", json_start + 6)
+        if json_start != -1 and json_end != -1:
+            json_str = response[json_start + 7:json_end].strip()
+            return json.loads(json_str)
+    except Exception as e:
+        st.error(f"Error extracting lead data: {e}")
+    return {}
+
+def update_lead_info(lead_data: Dict[str, Any]):
+    """Update lead information in session state"""
+    if not lead_data:
+        return
+    lead_data['timestamp'] = datetime.now().isoformat()
+    if lead_data.get('email'):
+        for i, lead in enumerate(st.session_state.leads):
+            if lead.get('email') == lead_data.get('email'):
+                st.session_state.leads[i].update(lead_data)
+                return
+    st.session_state.leads.append(lead_data)
+
+def save_leads_to_csv():
+    """Save leads to CSV file"""
+    if st.session_state.leads:
+        df = pd.DataFrame(st.session_state.leads)
+        df.to_csv('leads.csv', index=False)
+        return True
+    return False
+
+# Streamlit UI
+st.title("Lead Generation AI Assistant 💼")
+
+# Sidebar for API key and lead analytics
+with st.sidebar:
+    st.header("Configuration")
+    api_key_input = st.text_input("Enter Groq API Key", st.session_state.GROQ_API_KEY, type="password")
+    if st.button("Save API Key"):
+        st.session_state.GROQ_API_KEY = api_key_input
+        st.success("API Key saved!")
+    st.markdown("---")
+    st.header("Lead Analytics")
+    hot_leads = sum(1 for lead in st.session_state.leads if lead.get('lead_quality') == 'hot')
+    warm_leads = sum(1 for lead in st.session_state.leads if lead.get('lead_quality') == 'warm')
+    cold_leads = sum(1 for lead in st.session_state.leads if lead.get('lead_quality') == 'cold')
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Hot Leads", hot_leads)
+    col2.metric("Warm Leads", warm_leads)
+    col3.metric("Cold Leads", cold_leads)
+    if st.button("Export Leads"):
+        if save_leads_to_csv():
+            st.success("Leads exported to leads.csv")
+            st.download_button(
+                label="Download CSV",
+                data=pd.DataFrame(st.session_state.leads).to_csv(index=False),
+                file_name="leads.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("No leads to export")
+
+# Initialize chat interface
+if not st.session_state.messages:
+    st.session_state.messages.append({"role": "assistant", "content": "Hello! How can I assist you today?"})
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        content = message["content"]
+        if message["role"] == "assistant":
+            json_start = content.find("```json")
+            if json_start != -1:
+                content = content[:json_start]
+        st.markdown(content)
+
+if prompt := st.chat_input("Type your message here..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    client = initialize_groq_client()
+    if client:
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = get_groq_response(client, st.session_state.messages)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                lead_data = extract_lead_data(response)
+                update_lead_info(lead_data)
+                display_response = response.split("```json")[0]
+                st.markdown(display_response)
+    else:
+        st.error("Please enter a valid Groq API key in the sidebar.")
